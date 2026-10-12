@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -15,8 +18,13 @@ jobs:
       - name: Unzip project
         run: |
           set -e
-          ZIP_FILE=$(find . -maxdepth 1 -iname "*.zip" | head -n 1)
-          [ -z "$ZIP_FILE" ] && echo "Zip tidak ditemukan di root repo" && exit 1
+          # Pakai zip dengan nama versi tertinggi (v4 > v3)
+          ZIP_FILE=$(find . -maxdepth 1 -iname "*.zip" | sort -V | tail -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Tidak ada file .zip di root repo."
+            exit 1
+          fi
+          echo "Memakai zip: $ZIP_FILE"
           unzip -o "$ZIP_FILE" -d extracted
 
       - name: Locate project root
@@ -24,7 +32,11 @@ jobs:
         run: |
           set -e
           PROJECT_DIR=$(find extracted -maxdepth 3 -name "settings.gradle.kts" -exec dirname {} \; | head -n 1)
-          [ -z "$PROJECT_DIR" ] && echo "settings.gradle.kts tidak ditemukan" && exit 1
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "settings.gradle.kts tidak ditemukan di dalam zip."
+            find extracted -maxdepth 3
+            exit 1
+          fi
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
@@ -38,13 +50,35 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Validate HTML
+        run: python3 scripts/check_html.py
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+
       - name: Build debug APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
         working-directory: ${{ steps.locate.outputs.project_dir }}
 
-      - name: Upload debug APK
+      - name: Verify APK
+        run: |
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+
+      - name: Upload debug APK (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: cbt-smkn6garut-debug-apk
           path: ${{ steps.locate.outputs.project_dir }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Publish APK to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk CBT-SMKN6-Garut-debug.apk
+          gh release create "build-${{ github.run_number }}" CBT-SMKN6-Garut-debug.apk \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "CBT SMKN 6 Garut debug #${{ github.run_number }}" \
+            --notes "APK debug untuk pengujian."
+        working-directory: ${{ steps.locate.outputs.project_dir }}
